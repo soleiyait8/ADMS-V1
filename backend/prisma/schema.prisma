@@ -1,0 +1,570 @@
+// ADMS – Attendance and Device Management System
+// Design rules:
+//  * Raw device transactions are append-only. Corrections live in AttendanceAdjustment.
+//  * Processed attendance is derived and can be recalculated at any time.
+//  * No biometric templates (fingerprint/face/palm) are stored anywhere in this schema.
+//  * All instants are stored as timestamptz (UTC). Device wall-clock text is kept for audit.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Identity & access ─────────────────────────────
+
+model User {
+  id               String    @id @default(uuid()) @db.Uuid
+  email            String    @unique
+  fullName         String
+  passwordHash     String
+  roleId           String    @db.Uuid
+  role             Role      @relation(fields: [roleId], references: [id])
+  departmentId     String?   @db.Uuid // scope for Department Supervisors
+  department       Department? @relation(fields: [departmentId], references: [id])
+  isActive         Boolean   @default(true)
+  mfaEnabled       Boolean   @default(false)
+  mfaSecretEnc     String?   // encrypted TOTP secret
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+  passwordChangedAt DateTime @default(now())
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  refreshTokens    RefreshToken[]
+  resetTokens      PasswordResetToken[]
+  auditLogs        AuditLog[]
+}
+
+model Role {
+  id          String           @id @default(uuid()) @db.Uuid
+  key         String           @unique // SUPER_ADMIN, SYSTEM_ADMIN, HR_MANAGER ...
+  name        String
+  description String?
+  isSystem    Boolean          @default(true)
+  permissions RolePermission[]
+  users       User[]
+}
+
+model Permission {
+  id    String           @id @default(uuid()) @db.Uuid
+  key   String           @unique // e.g. "employees.write"
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       String     @db.Uuid
+  permissionId String     @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  @@id([roleId, permissionId])
+}
+
+/// Refresh tokens are stored hashed. Rotation uses familyId for reuse detection.
+model RefreshToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique
+  familyId    String    @db.Uuid
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  replacedById String?  @db.Uuid
+  createdIp   String?
+  userAgent   String?
+  createdAt   DateTime  @default(now())
+  @@index([userId])
+  @@index([familyId])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+}
+
+// ───────────────────────────── Organization ─────────────────────────────
+
+model Site {
+  id          String       @id @default(uuid()) @db.Uuid
+  code        String       @unique
+  name        String
+  timezone    String       @default("Asia/Manila") // IANA name
+  address     String?
+  isActive    Boolean      @default(true)
+  departments Department[]
+  employees   Employee[]
+  devices     Device[]
+  holidays    Holiday[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model Department {
+  id        String     @id @default(uuid()) @db.Uuid
+  code      String     @unique
+  name      String
+  siteId    String?    @db.Uuid
+  site      Site?      @relation(fields: [siteId], references: [id])
+  isActive  Boolean    @default(true)
+  employees Employee[]
+  users     User[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model Position {
+  id        String     @id @default(uuid()) @db.Uuid
+  code      String     @unique
+  title     String
+  isActive  Boolean    @default(true)
+  employees Employee[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+enum EmploymentStatus {
+  REGULAR
+  PROBATIONARY
+  CONTRACTUAL
+  PROJECT_BASED
+  PART_TIME
+  INTERN
+}
+
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+model Employee {
+  id               String           @id @default(uuid()) @db.Uuid
+  employeeNo       String           @unique
+  firstName        String
+  middleName       String?
+  lastName         String
+  departmentId     String?          @db.Uuid
+  department       Department?      @relation(fields: [departmentId], references: [id])
+  positionId       String?          @db.Uuid
+  position         Position?        @relation(fields: [positionId], references: [id])
+  siteId           String?          @db.Uuid
+  site             Site?            @relation(fields: [siteId], references: [id])
+  employmentStatus EmploymentStatus @default(REGULAR)
+  status           RecordStatus     @default(ACTIVE)
+  dateHired        DateTime?        @db.Date
+  email            String?
+  phone            String?
+  photoPath        String?          // profile photo only – never a biometric template
+  archivedAt       DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  deviceMappings   DeviceUserMapping[]
+  shiftAssignments ShiftAssignment[]
+  rawTransactions  RawAttendanceTransaction[]
+  processed        ProcessedAttendance[]
+  adjustments      AttendanceAdjustment[]
+  leaves           LeaveRecord[]
+  history          EmployeeHistory[]
+
+  @@index([departmentId])
+  @@index([status])
+  @@index([lastName, firstName])
+}
+
+model EmployeeHistory {
+  id          String   @id @default(uuid()) @db.Uuid
+  employeeId  String   @db.Uuid
+  employee    Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  changedById String?  @db.Uuid
+  changes     Json     // { field: { from, to } }
+  createdAt   DateTime @default(now())
+  @@index([employeeId, createdAt])
+}
+
+// ───────────────────────────── Devices ─────────────────────────────
+
+enum DeviceProtocol {
+  ZK_PUSH      // ZKTeco ADMS / PUSH over HTTP(S), device-initiated
+  ZK_SDK_LAN   // ZKTeco pull over TCP 4370 (standalone SDK) – adapter interface only
+  VENDOR_API
+  MOCK         // development & tests only; data is flagged isSimulated
+}
+
+model Device {
+  id               String         @id @default(uuid()) @db.Uuid
+  name             String         @unique
+  serialNumber     String         @unique
+  model            String?        // e.g. "MB10-VL" – as reported/verified
+  firmwareVersion  String?        // populated from device INFO, not typed in
+  pushVersion      String?
+  protocol         DeviceProtocol @default(ZK_PUSH)
+  siteId           String?        @db.Uuid
+  site             Site?          @relation(fields: [siteId], references: [id])
+  timezone         String         @default("Asia/Manila") // zone of the device clock
+  ipAddress        String?
+  port             Int?
+  allowedIpCidrs   String[]       @default([]) // optional source-IP allowlist for push
+  isEnabled        Boolean        @default(true)
+  pushDelaySeconds Int            @default(10)
+  attLogStamp      String?        // last ATTLOG stamp acknowledged (ZK push)
+  operLogStamp     String?
+  lastSeenAt       DateTime?      // set ONLY on a real, authenticated device request
+  lastSeenIp       String?
+  lastErrorAt      DateTime?
+  lastError        String?
+  deviceUserCount  Int?
+  deviceLogCount   Int?
+  options          Json?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  credentials      DeviceCredential[]
+  userMappings     DeviceUserMapping[]
+  rawTransactions  RawAttendanceTransaction[]
+  commLogs         DeviceCommunicationLog[]
+  commands         DeviceCommand[]
+  syncJobs         SyncJob[]
+  notifications    Notification[]
+}
+
+/// Secrets for adapters that support them (e.g. SDK comm key). Stored encrypted, never returned by the API.
+model DeviceCredential {
+  id         String   @id @default(uuid()) @db.Uuid
+  deviceId   String   @db.Uuid
+  device     Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  kind       String   // "COMM_KEY" | "API_TOKEN" | ...
+  secretEnc  String
+  rotatedAt  DateTime @default(now())
+  @@unique([deviceId, kind])
+}
+
+model DeviceUserMapping {
+  id           String   @id @default(uuid()) @db.Uuid
+  employeeId   String   @db.Uuid
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  deviceId     String   @db.Uuid
+  device       Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  deviceUserId String   // the PIN enrolled on the terminal
+  createdAt    DateTime @default(now())
+  @@unique([deviceId, deviceUserId])
+  @@unique([deviceId, employeeId])
+}
+
+enum CommDirection {
+  INBOUND
+  OUTBOUND
+}
+
+/// Metadata only. Request bodies are NOT stored here (they may contain personal data).
+model DeviceCommunicationLog {
+  id           BigInt        @id @default(autoincrement())
+  deviceId     String?       @db.Uuid
+  device       Device?       @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  serialNumber String?
+  direction    CommDirection
+  method       String
+  path         String
+  table        String?
+  statusCode   Int
+  outcome      String        // OK | REJECTED_UNKNOWN_DEVICE | DISABLED | IP_DENIED | PARSE_ERROR ...
+  summary      String?
+  remoteIp     String?
+  durationMs   Int?
+  createdAt    DateTime      @default(now())
+  @@index([deviceId, createdAt])
+  @@index([createdAt])
+}
+
+enum CommandStatus {
+  QUEUED
+  SENT
+  SUCCEEDED
+  FAILED
+  EXPIRED
+}
+
+model DeviceCommand {
+  id          String        @id @default(uuid()) @db.Uuid
+  seq         Int           @default(autoincrement()) @unique // numeric ID sent to device ("C:<seq>:")
+  deviceId    String        @db.Uuid
+  device      Device        @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  command     String        // allow-listed command text
+  status      CommandStatus @default(QUEUED)
+  returnCode  Int?
+  result      String?
+  requestedById String?     @db.Uuid
+  createdAt   DateTime      @default(now())
+  sentAt      DateTime?
+  completedAt DateTime?
+  @@index([deviceId, status])
+}
+
+enum SyncJobStatus {
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+}
+
+model SyncJob {
+  id               String        @id @default(uuid()) @db.Uuid
+  deviceId         String        @db.Uuid
+  device           Device        @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  kind             String        // PUSH_ATTLOG | PUSH_OPERLOG | PULL_RANGE | MOCK
+  status           SyncJobStatus @default(RUNNING)
+  recordsReceived  Int           @default(0)
+  recordsImported  Int           @default(0)
+  recordsDuplicate Int           @default(0)
+  recordsRejected  Int           @default(0)
+  recordsUnmapped  Int           @default(0)
+  error            String?
+  startedAt        DateTime      @default(now())
+  finishedAt       DateTime?
+  transactions     RawAttendanceTransaction[]
+  @@index([deviceId, startedAt])
+}
+
+// ───────────────────────────── Attendance ─────────────────────────────
+
+enum RawTxnStatus {
+  IMPORTED   // mapped to an employee
+  UNMAPPED   // valid punch, device PIN not mapped yet (re-linked when a mapping is added)
+}
+
+/// Append-only. Never updated except employeeId/status when an UNMAPPED PIN gets mapped.
+model RawAttendanceTransaction {
+  id                 BigInt       @id @default(autoincrement())
+  deviceId           String       @db.Uuid
+  device             Device       @relation(fields: [deviceId], references: [id])
+  deviceUserId       String
+  employeeId         String?      @db.Uuid
+  employee           Employee?    @relation(fields: [employeeId], references: [id])
+  punchedAt          DateTime     // UTC instant, derived from device wall clock + device timezone
+  deviceLocalTime    String       // exactly as sent: "2026-10-22 08:01:33"
+  serverReceivedAt   DateTime     @default(now())
+  punchState         Int?         // 0 check-in, 1 check-out, 2 break-out, 3 break-in, 4 OT-in, 5 OT-out (device-defined)
+  verifyMode         Int?         // device-defined code; method only, no biometric data
+  workCode           String?
+  sourceTxnId        String?      // when the protocol provides one
+  rawLine            String?      // original ATTLOG line (PIN + time + codes only)
+  dedupKey           String       @unique
+  status             RawTxnStatus
+  isSimulated        Boolean      @default(false)
+  syncJobId          String?      @db.Uuid
+  syncJob            SyncJob?     @relation(fields: [syncJobId], references: [id])
+  adjustments        AttendanceAdjustment[]
+  @@index([employeeId, punchedAt])
+  @@index([deviceId, punchedAt])
+  @@index([punchedAt])
+}
+
+enum AdjustmentType {
+  ADD_PUNCH   // add a missing punch
+  VOID_PUNCH  // exclude a raw punch from calculation (raw row is kept)
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model AttendanceAdjustment {
+  id            String         @id @default(uuid()) @db.Uuid
+  employeeId    String         @db.Uuid
+  employee      Employee       @relation(fields: [employeeId], references: [id])
+  type          AdjustmentType
+  punchedAt     DateTime?      // for ADD_PUNCH
+  punchState    Int?
+  rawTxnId      BigInt?        // for VOID_PUNCH
+  rawTxn        RawAttendanceTransaction? @relation(fields: [rawTxnId], references: [id])
+  reason        String
+  status        ApprovalStatus @default(PENDING)
+  requestedById String         @db.Uuid
+  reviewedById  String?        @db.Uuid
+  reviewedAt    DateTime?
+  reviewNote    String?
+  createdAt     DateTime       @default(now())
+  @@index([employeeId, status])
+}
+
+enum DayStatus {
+  PRESENT
+  ABSENT
+  INCOMPLETE  // missing in or out
+  REST_DAY
+  HOLIDAY
+  ON_LEAVE
+  OFFICIAL_BUSINESS
+}
+
+/// Derived. Safe to recompute; calcVersion + inputsHash make recalculation auditable.
+model ProcessedAttendance {
+  id               String         @id @default(uuid()) @db.Uuid
+  employeeId       String         @db.Uuid
+  employee         Employee       @relation(fields: [employeeId], references: [id])
+  workDate         DateTime       @db.Date // the date the shift STARTS (handles overnight)
+  scheduleId       String?        @db.Uuid
+  firstIn          DateTime?
+  lastOut          DateTime?
+  regularMinutes   Int            @default(0)
+  lateMinutes      Int            @default(0)
+  undertimeMinutes Int            @default(0)
+  overtimeMinutes  Int            @default(0)
+  overtimeStatus   ApprovalStatus @default(PENDING)
+  overtimeApprovedById String?    @db.Uuid
+  status           DayStatus
+  flags            String[]       @default([]) // MISSING_IN, MISSING_OUT, ...
+  calcVersion      Int            @default(1)
+  inputsHash       String?
+  computedAt       DateTime       @default(now())
+  @@unique([employeeId, workDate])
+  @@index([workDate])
+}
+
+// ───────────────────────────── Scheduling ─────────────────────────────
+
+enum ScheduleType {
+  FIXED
+  FLEXIBLE
+  ROTATING
+}
+
+model WorkSchedule {
+  id                       String       @id @default(uuid()) @db.Uuid
+  code                     String       @unique
+  name                     String
+  type                     ScheduleType @default(FIXED)
+  startTime                String?      // "08:00" local site time (null for FLEXIBLE)
+  endTime                  String?      // "17:00"; if <= startTime the shift crosses midnight
+  breakMinutes             Int          @default(60)
+  requiredMinutes          Int          @default(480)
+  lateGraceMinutes         Int          @default(0)
+  earlyOutGraceMinutes     Int          @default(0)
+  overtimeThresholdMinutes Int          @default(30) // min minutes past end before OT counts
+  coreStart                String?      // FLEXIBLE core hours
+  coreEnd                  String?
+  restDays                 Int[]        @default([0]) // ISO weekday numbers, 0=Sunday convention documented in code
+  rotationPattern          Json?        // ROTATING: [{ scheduleCode, days }]
+  isActive                 Boolean      @default(true)
+  assignments              ShiftAssignment[]
+  createdAt                DateTime     @default(now())
+  updatedAt                DateTime     @updatedAt
+}
+
+model ShiftAssignment {
+  id            String       @id @default(uuid()) @db.Uuid
+  employeeId    String       @db.Uuid
+  employee      Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  scheduleId    String       @db.Uuid
+  schedule      WorkSchedule @relation(fields: [scheduleId], references: [id])
+  effectiveFrom DateTime     @db.Date
+  effectiveTo   DateTime?    @db.Date
+  createdById   String?      @db.Uuid
+  createdAt     DateTime     @default(now())
+  @@index([employeeId, effectiveFrom])
+}
+
+enum HolidayType {
+  REGULAR
+  SPECIAL_NON_WORKING
+  SPECIAL_WORKING
+  COMPANY
+}
+
+model Holiday {
+  id        String      @id @default(uuid()) @db.Uuid
+  date      DateTime    @db.Date
+  name      String
+  type      HolidayType
+  siteId    String?     @db.Uuid // null = all sites
+  site      Site?       @relation(fields: [siteId], references: [id])
+  createdAt DateTime    @default(now())
+  @@unique([date, siteId, name])
+}
+
+enum LeaveType {
+  VACATION
+  SICK
+  EMERGENCY
+  MATERNITY
+  PATERNITY
+  SOLO_PARENT
+  OFFICIAL_BUSINESS
+  OTHER
+}
+
+model LeaveRecord {
+  id           String         @id @default(uuid()) @db.Uuid
+  employeeId   String         @db.Uuid
+  employee     Employee       @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  type         LeaveType
+  startDate    DateTime       @db.Date
+  endDate      DateTime       @db.Date
+  halfDay      Boolean        @default(false)
+  reason       String?
+  status       ApprovalStatus @default(PENDING)
+  approvedById String?        @db.Uuid
+  createdAt    DateTime       @default(now())
+  @@index([employeeId, startDate])
+}
+
+// ───────────────────────────── Monitoring & audit ─────────────────────────────
+
+enum Severity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+/// One row per incident. openIncidentKey is unique while open and nulled on resolve,
+/// so the same unresolved incident cannot raise duplicate alerts.
+model Notification {
+  id              String    @id @default(uuid()) @db.Uuid
+  type            String    // DEVICE_OFFLINE, DEVICE_AUTH_FAILURE, SYNC_FAILURE ...
+  severity        Severity
+  title           String
+  message         String
+  deviceId        String?   @db.Uuid
+  device          Device?   @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  openIncidentKey String?   @unique
+  occurrenceCount Int       @default(1)
+  firstSeenAt     DateTime  @default(now())
+  lastSeenAt      DateTime  @default(now())
+  resolvedAt      DateTime?
+  @@index([resolvedAt, lastSeenAt])
+}
+
+model AuditLog {
+  id          BigInt   @id @default(autoincrement())
+  actorUserId String?  @db.Uuid
+  actor       User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  action      String   // employee.create, attendance.adjust.approve, report.export ...
+  entityType  String
+  entityId    String?
+  before      Json?
+  after       Json?
+  ip          String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+  @@index([entityType, entityId])
+  @@index([actorUserId, createdAt])
+  @@index([createdAt])
+}
+
+model AppSetting {
+  key         String   @id
+  value       Json
+  updatedById String?  @db.Uuid
+  updatedAt   DateTime @updatedAt
+}

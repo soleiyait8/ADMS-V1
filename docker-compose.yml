@@ -1,0 +1,45 @@
+# ADMS – production-style stack. Secrets come from .env (copy .env.example).
+services:
+  db:
+    image: postgres:16.6-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: adms
+      POSTGRES_USER: adms
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adms -d adms"]
+      interval: 10s
+      retries: 5
+    networks: [internal]          # never published to the host
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://adms:${POSTGRES_PASSWORD}@db:5432/adms?schema=public
+    depends_on:
+      db: { condition: service_healthy }
+    networks: [internal]
+
+  nginx:
+    image: nginx:1.27.3-bookworm
+    restart: unless-stopped
+    depends_on: [backend]
+    ports:
+      - "443:443"                 # admin UI/API (HTTPS)
+      - "80:80"                   # redirect to HTTPS only
+      - "8081:8081"               # device ADMS push port – firewall to device subnets!
+    volumes:
+      - ./deploy/nginx/adms.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+    networks: [internal]
+
+volumes:
+  pgdata:
+
+networks:
+  internal:
