@@ -1,18 +1,18 @@
 /**
- * DEVELOPMENT SEED ONLY. Refuses to run in production.
- * Creates roles/permissions, a site, departments, and an initial Super Administrator
- * whose password is taken from SEED_ADMIN_PASSWORD (never hardcoded).
+ * Seeds roles/permissions and an initial Super Administrator whose password comes from
+ * SEED_ADMIN_PASSWORD (never hardcoded). Sample site/departments are created in development only.
+ * In production it runs only with SEED_ALLOW_PRODUCTION_RBAC_ONLY=true and skips sample data.
  */
 import { PrismaClient } from "@prisma/client";
-import { PERMISSIONS, ROLES } from "../src/auth/permissions";
-import { hashPassword, passwordPolicyError } from "../src/auth/password";
+import { PERMISSIONS, ROLES } from "../auth/permissions";
+import { hashPassword, passwordPolicyError } from "../auth/password";
 
 async function main() {
   if (process.env.NODE_ENV === "production" && process.env.SEED_ALLOW_PRODUCTION_RBAC_ONLY !== "true") {
     throw new Error("Refusing to seed in production. Set SEED_ALLOW_PRODUCTION_RBAC_ONLY=true to seed roles only.");
   }
   const db = new PrismaClient();
-  const rbacOnly = process.env.NODE_ENV === "production";
+  const isProd = process.env.NODE_ENV === "production";
 
   for (const key of PERMISSIONS) await db.permission.upsert({ where: { key }, create: { key }, update: {} });
   const perms = new Map((await db.permission.findMany()).map((p) => [p.key, p.id]));
@@ -22,11 +22,11 @@ async function main() {
     await db.rolePermission.createMany({ data: def.permissions.map((p) => ({ roleId: role.id, permissionId: perms.get(p)! })) });
   }
   console.log(`Seeded ${PERMISSIONS.length} permissions and ${Object.keys(ROLES).length} roles`);
-  if (rbacOnly) return db.$disconnect();
-
-  const site = await db.site.upsert({ where: { code: "MAIN" }, create: { code: "MAIN", name: "Main Office", timezone: "Asia/Manila" }, update: {} });
-  for (const [code, name] of [["HR", "Human Resources"], ["IT", "Information Technology"], ["OPS", "Operations"]] as const) {
-    await db.department.upsert({ where: { code }, create: { code, name, siteId: site.id }, update: {} });
+  if (!isProd) {
+    const site = await db.site.upsert({ where: { code: "MAIN" }, create: { code: "MAIN", name: "Main Office", timezone: "Asia/Manila" }, update: {} });
+    for (const [code, name] of [["HR", "Human Resources"], ["IT", "Information Technology"], ["OPS", "Operations"]] as const) {
+      await db.department.upsert({ where: { code }, create: { code, name, siteId: site.id }, update: {} });
+    }
   }
 
   const email = process.env.SEED_ADMIN_EMAIL ?? "admin@example.local";

@@ -1,4 +1,13 @@
-node_modules
-dist
+node_modules/
+dist/
+coverage/
+*.log
 .env
-deploy/certs
+.env.*
+!.env.example
+deploy/certs/
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/

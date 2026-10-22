@@ -1,0 +1,24 @@
+name: Device compatibility report
+description: Results from testing a biometric terminal (e.g. MB10-VL) against docs/MB10-VL-COMPATIBILITY.md
+labels: [device-compatibility]
+body:
+  - type: input
+    id: model
+    attributes: { label: Device model, placeholder: MB10-VL }
+    validations: { required: true }
+  - type: input
+    id: firmware
+    attributes: { label: Firmware version (from device or comm log) }
+    validations: { required: true }
+  - type: input
+    id: pushver
+    attributes: { label: Push protocol version (pushver) }
+  - type: textarea
+    id: results
+    attributes:
+      label: Checklist results
+      description: Copy the relevant checklist rows with Pass/Fail. Mask serial numbers if this repository is public. Never include fingerprint/face data.
+    validations: { required: true }
+  - type: textarea
+    id: traffic
+    attributes: { label: "Captured request samples (paths, query, ATTLOG lines with PINs anonymised)" }

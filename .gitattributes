@@ -1,0 +1,7 @@
+# Normalise line endings so scripts and Dockerfiles work when cloned on Windows.
+* text=auto eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.woff2 binary

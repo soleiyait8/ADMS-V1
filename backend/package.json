@@ -4,7 +4,7 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "tsx watch --env-file-if-exists=.env src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -12,23 +12,27 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
-    "seed": "tsx prisma/seed.ts"
+    "seed": "tsx --env-file-if-exists=.env src/scripts/seed.ts",
+    "seed:prod": "node dist/scripts/seed.js",
+    "prisma:validate": "prisma validate",
+    "ci": "prisma validate && prisma generate && tsc -p tsconfig.json --noEmit && vitest run"
   },
   "prisma": {
-    "seed": "tsx prisma/seed.ts"
+    "seed": "tsx src/scripts/seed.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",
-    "@prisma/client": "^6.16.2",
+    "@prisma/client": "6.19.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
-    "express": "^4.21.2",
+    "express": "4.22.3",
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "luxon": "^3.5.0",
     "pino": "^9.6.0",
     "pino-http": "^10.4.0",
+    "prisma": "6.19.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -39,10 +43,15 @@
     "@types/luxon": "^3.4.2",
     "@types/node": "^22.10.5",
     "@types/supertest": "^6.0.2",
-    "prisma": "^6.16.2",
     "supertest": "^7.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"
+  },
+  "overrides": {
+    "deepmerge-ts": "8.0.2"
+  },
+  "engines": {
+    "node": ">=22.12"
   }
 }

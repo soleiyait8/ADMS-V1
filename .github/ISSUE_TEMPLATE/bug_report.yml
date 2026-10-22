@@ -1,0 +1,14 @@
+name: Bug report
+description: Something in ADMS is not working
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: { label: What happened?, description: "Do not paste passwords, tokens, or employee personal data." }
+    validations: { required: true }
+  - type: textarea
+    id: steps
+    attributes: { label: Steps to reproduce }
+  - type: input
+    id: version
+    attributes: { label: Commit or version }
